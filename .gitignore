@@ -1,0 +1,43 @@
+# ---- experiment outputs (large; regenerate with the scripts in scripts/) ----
+runs/
+outputs/
+figures/
+*.ckpt
+ckpt_step_*/
+final/
+
+# ---- caches ----
+hf_cache/
+.cache/
+__pycache__/
+*.py[cod]
+*.so
+torchinductor_*/
+.pytest_cache/
+
+# ---- logs ----
+*.log
+logs/
+tb/
+events.out.tfevents.*
+
+# ---- W&B / tensorboard scratch ----
+wandb/
+tmp*wandb-artifacts/
+tmp*wandb-media/
+
+# ---- env ----
+.venv/
+venv/
+.env
+*.egg-info/
+build/
+dist/
+
+# ---- editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+*.swp
+_archive/
+paper/

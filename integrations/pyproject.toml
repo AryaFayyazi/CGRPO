@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trl-cgrpo"
+version = "0.2.0"
+description = "Conformal adaptive rollout budgets (C-GRPO) as a GRPOTrainer subclass for TRL"
+readme = "trl_cgrpo/README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["trl>=1.12", "datasets", "numpy>=1.24", "torch"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["trl_cgrpo*"]
