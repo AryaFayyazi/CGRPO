@@ -46,7 +46,7 @@ split = data.train_test_split(test_size=200, seed=0)  # calibration examples mus
 trainer = CGRPOTrainer(
     model="Qwen/Qwen2.5-0.5B-Instruct",
     reward_funcs=correctness_reward,
-    args=CGRPOConfig(budget_grid=[2, 4, 8, 16, 32], recalibrate_every=50, per_device_train_batch_size=32),
+    args=CGRPOConfig(budget_grid=[2, 4, 8, 16, 32], recalibrate_every=50),
     train_dataset=split["train"],
     calibration_dataset=split["test"],
     answer_extractor=extract_answer,
@@ -83,6 +83,8 @@ Logged metrics: `cgrpo/mean_k`, `cgrpo/rollout_savings`, `cgrpo/delta`, `cgrpo/q
   logged as `cgrpo/calibration_rollouts` and not included in `cgrpo/rollout_savings`.
 - **vLLM.** `use_vllm=True` works in server and colocate mode; each budget increment is one generation request
   (at most `len(budget_grid)` per batch), and padded rows get no importance-sampling correction.
+- **Loss types.** The token-normalized losses (`dapo`, the default, `bnpo`, `cispo`, `vespo`) are supported;
+  padded rows are masked out of them exactly. `grpo`, `sapo`, `luspo` and `dr_grpo` raise `NotImplementedError`.
 - **Scope.** Single process. Multi-process training, tools, environments, `rollout_func` and vision-language
   models raise `NotImplementedError`.
 - Padded rows appear in TRL's completion-length statistics and completion tables as one-token completions.

@@ -8,6 +8,7 @@ from .conformal import (
     first_success_score,
     pass_rate_score,
     prediction_set,
+    resolves_singleton,
     select_delta_auto,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "first_success_score",
     "pass_rate_score",
     "prediction_set",
+    "resolves_singleton",
     "select_delta_auto",
 ]
