@@ -162,6 +162,12 @@ without this research codebase. It is a standalone copy of the `trl.experimental
 upstream, and works with released TRL (tested with TRL 1.12 and TRL main):
 
 ```bash
+pip install "git+https://github.com/AryaFayyazi/CGRPO.git#subdirectory=integrations"
+```
+
+or, from a clone of this repository:
+
+```bash
 pip install -e integrations/
 pytest integrations/trl_cgrpo/tests -q   # CPU; downloads tiny test models
 ```

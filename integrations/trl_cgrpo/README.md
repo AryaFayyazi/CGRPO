@@ -12,8 +12,10 @@ released TRL (tested with 1.12 and TRL main).
 ## Install
 
 ```bash
-pip install -e integrations/        # from the root of this repository
+pip install "git+https://github.com/AryaFayyazi/CGRPO.git#subdirectory=integrations"
 ```
+
+or `pip install -e integrations/` from the root of a clone. Requires TRL >= 1.12.
 
 ## Usage
 
