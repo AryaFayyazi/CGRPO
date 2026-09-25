@@ -81,8 +81,10 @@ Logged metrics: `cgrpo/mean_k`, `cgrpo/rollout_savings`, `cgrpo/delta`, `cgrpo/q
 
 - **Calibration is not free.** Each calibration generates `num_calibration_samples × max(budget_grid)` completions,
   logged as `cgrpo/calibration_rollouts` and not included in `cgrpo/rollout_savings`.
-- **Scope.** Single process, transformers generation. vLLM, multi-process training, tools, environments,
-  `rollout_func` and vision-language models raise `NotImplementedError`.
+- **vLLM.** `use_vllm=True` works in server and colocate mode; each budget increment is one generation request
+  (at most `len(budget_grid)` per batch), and padded rows get no importance-sampling correction.
+- **Scope.** Single process. Multi-process training, tools, environments, `rollout_func` and vision-language
+  models raise `NotImplementedError`.
 - Padded rows appear in TRL's completion-length statistics and completion tables as one-token completions.
 
 ## Tests

@@ -105,6 +105,15 @@ def main():
     parser.add_argument("--dynamic-baselines", type=str, default="", help="comma-separated heuristics: softmax,entropy")
     parser.add_argument("--baseline-thresholds", type=str, default="0.5", help="comma-separated threshold values used by heuristics")
     parser.add_argument("--no-lora", action="store_true", help="do not load/merge LoRA; evaluate base model only")
+    parser.add_argument("--delta", type=str, default="auto",
+                        help="miscoverage for the thresholds: 'auto' (as in training: (1 - pass@K_max) + 0.05 from "
+                             "the calibration scores) or a float")
+    parser.add_argument("--split-delta", action="store_true",
+                        help="with --delta auto, choose delta on the first half of the calibration set and the "
+                             "thresholds on the second half, as train.py --split-delta does")
+    parser.add_argument("--k-values", type=str, default=None,
+                        help="comma-separated conformal budget grid; pass the grid the checkpoint was trained with "
+                             "(the config default stops at 16)")
     parser.add_argument("--max-new-tokens", type=int, default=None,
                         help="max new tokens per completion (overrides TrainConfig default; "
                              "use the same value as training for classification datasets)")
@@ -130,6 +139,8 @@ def main():
         cfg.n_cal = args.n_cal
     if args.n_eval is not None:
         cfg.n_eval = args.n_eval
+    if args.k_values:
+        cfg.k_values = tuple(sorted(int(x) for x in args.k_values.split(",")))
     if args.k_max is not None:
         global K_MAX
         K_MAX = args.k_max
@@ -306,9 +317,12 @@ def main():
                 cal_true[-1] = g  # raw JSON gold
 
     # Calibrate qhats for ALL k values we want to evaluate
-    all_k_for_cal = sorted(set(FIXED_K_VALUES + list(cfg.k_values)))
-    all_k_for_cal = [k for k in all_k_for_cal if k <= K_MAX and k >= 2]
-    print(f"\nCalibrating qhats for k = {all_k_for_cal}, delta = {cfg.deltas[0]}")
+    # k=1 is only calibrated when it is part of the conformal grid; the fixed k=1 row is greedy decoding.
+    all_k_for_cal = sorted({k for k in FIXED_K_VALUES if k >= 2} | set(cfg.k_values))
+    all_k_for_cal = [k for k in all_k_for_cal if 1 <= k <= K_MAX]
+    if max(cfg.k_values) < K_MAX:
+        print(f"WARNING: conformal grid {cfg.k_values} stops below --k-max {K_MAX}; "
+              f"pass --k-values with the training grid")
     _score_fn = None
     if "aquamuse" in cfg.dataset_name.lower():
         from verifier import _token_precision
@@ -332,7 +346,32 @@ def main():
                          if verify_answer(gen, gold_raw, _dataset_name_closure))
             return 1.0 - n_pass / k
         _score_fn = _code_score_fn
-    fresh_qhats = calibrate_qhats(cal_true, cal_group_answers, tuple(all_k_for_cal), cfg.deltas[0],
+    # ---- miscoverage level: mirror train.py's calibrate_conformal ----------------------
+    # Paper Table 4 reports coverage at the auto-selected delta. A fixed delta=0.1 on a benchmark the
+    # policy mostly fails pins every threshold at 1.0 and makes the coverage check vacuous.
+    _q_true, _q_groups = cal_true, cal_group_answers
+    cal_solve_rate = None
+    if (args.delta or "auto").strip().lower() == "auto":
+        from conformal import select_delta_auto
+        _d_true, _d_groups = cal_true, cal_group_answers
+        if args.split_delta and len(cal_true) >= 4:
+            _h = len(cal_true) // 2
+            _d_true, _d_groups = cal_true[:_h], cal_group_answers[:_h]
+            _q_true, _q_groups = cal_true[_h:], cal_group_answers[_h:]
+        _kmax_scores = [
+            _score_fn(t, g[:K_MAX]) if _score_fn is not None else score_true_answer(t, answer_freqs(g[:K_MAX]), K_MAX)
+            for t, g in zip(_d_true, _d_groups)
+        ]
+        _delta, cal_solve_rate = select_delta_auto(np.asarray(_kmax_scores))
+        cfg.deltas = (float(_delta),)
+        delta_mode = "auto, split" if args.split_delta else "auto"
+        print(f"\n  [Auto-δ] pass@{K_MAX}={cal_solve_rate:.1%} on {len(_kmax_scores)} cal examples "
+              f"-> δ={cfg.deltas[0]:.3f}")
+    else:
+        cfg.deltas = (float(args.delta),)
+        delta_mode = "fixed"
+    print(f"\nCalibrating qhats for k = {all_k_for_cal}, delta = {cfg.deltas[0]} ({delta_mode})")
+    fresh_qhats = calibrate_qhats(_q_true, _q_groups, tuple(all_k_for_cal), cfg.deltas[0],
                                    score_fn=_score_fn)
 
     # build dynamic baseline helpers and parse CLI arguments
@@ -863,6 +902,9 @@ def main():
                     for k, v in results.items()},
         "conformal_qhats": conf_qhats,
         "conformal_k_usage": dict(k_usage),
+        "delta": float(cfg.deltas[0]),
+        "delta_mode": delta_mode,
+        "calibration_solve_rate": cal_solve_rate,
         "cost_metrics": cost_metrics,
         # Saved at top level because the "results" flattening above keeps only
         # scalar fields, and every per-k coverage record is itself a dict. Nested

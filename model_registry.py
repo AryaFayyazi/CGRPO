@@ -35,7 +35,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, str]] = {
         "dtype": "bfloat16",
     },
     "qwen2.5-math-7b-instruct": {
-        "hf_id": _MODEL_ROOT + "/models--Qwen--Qwen2.5-Math-7B-Instruct",
+        "hf_id": _MODEL_ROOT + "/models--Qwen--Qwen2.5-Math-7B-Instruct/snapshots/ef9926d75ab1d54532f6a30dd5e760355eb9aa4d",
         "group": "medium",
         "dtype": "bfloat16",
     },

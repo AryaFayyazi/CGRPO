@@ -10,7 +10,9 @@ integration needs revisiting.
 
 Requires trl; skipped when it is not installed.
 """
+
 import pytest
+
 
 torch = pytest.importorskip("torch")
 nanstd = pytest.importorskip("trl.trainer.utils").nanstd
@@ -30,21 +32,18 @@ def _advantages(rewards):
 
 def test_baseline_ignores_padded_slots():
     # prompt A stopped at k=2, prompt B ran the full k=4
-    adv, mean, _ = _advantages([1.0, 0.0, float("nan"), float("nan"),
-                                1.0, 1.0, 0.0, 1.0])
-    assert mean[0].item() == pytest.approx(0.5)     # (1+0)/2, not /4
+    adv, mean, _ = _advantages([1.0, 0.0, float("nan"), float("nan"), 1.0, 1.0, 0.0, 1.0])
+    assert mean[0].item() == pytest.approx(0.5)  # (1+0)/2, not /4
     assert mean[4].item() == pytest.approx(0.75)
 
 
 def test_padded_slots_get_zero_advantage():
-    adv, _, pad = _advantages([1.0, 0.0, float("nan"), float("nan"),
-                               1.0, 1.0, 0.0, 1.0])
+    adv, _, pad = _advantages([1.0, 0.0, float("nan"), float("nan"), 1.0, 1.0, 0.0, 1.0])
     assert torch.all(adv[pad] == 0.0)
 
 
 def test_real_slots_keep_nonzero_advantage():
-    adv, _, pad = _advantages([1.0, 0.0, float("nan"), float("nan"),
-                               1.0, 1.0, 0.0, 1.0])
+    adv, _, pad = _advantages([1.0, 0.0, float("nan"), float("nan"), 1.0, 1.0, 0.0, 1.0])
     assert adv[0].item() == pytest.approx(0.5)
     assert adv[1].item() == pytest.approx(-0.5)
 
@@ -64,10 +63,8 @@ def test_nanstd_ignores_padding_and_is_the_sample_std():
     """
     r = torch.tensor([1.0, 0.0, float("nan"), float("nan")])
     got = nanstd(r.view(-1, G), dim=1)[0].item()
-    assert got == pytest.approx(
-        torch.tensor([1.0, 0.0]).std(unbiased=True).item(), abs=1e-6)
-    assert got != pytest.approx(
-        torch.tensor([1.0, 0.0]).std(unbiased=False).item(), abs=1e-6)
+    assert got == pytest.approx(torch.tensor([1.0, 0.0]).std(unbiased=True).item(), abs=1e-6)
+    assert got != pytest.approx(torch.tensor([1.0, 0.0]).std(unbiased=False).item(), abs=1e-6)
 
 
 def test_fully_padded_group_does_not_crash():

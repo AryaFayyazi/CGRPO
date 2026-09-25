@@ -182,7 +182,7 @@ Early-stopped prompts are padded to `max(budget_grid)` with one-token completion
 advantage) and are removed from the loss mask and normalizer. The conformal utilities agree exactly with
 [`conformal.py`](conformal.py) on quantile, APS score and prediction set. See
 [`integrations/trl_cgrpo/README.md`](integrations/trl_cgrpo/README.md) for options and current limits
-(single process, no vLLM).
+(single process; vLLM supported in server and colocate mode).
 
 ## Citation
 

@@ -165,15 +165,27 @@ def build_models(cfg, pi_device, ref_device):
               '        state; use >=2 GPUs, --optim-8bit, or gradient checkpointing.')
     shared_ref = _needs_shared_ref(model_path, dtype)
     if full_ft and shared_ref:
-        raise RuntimeError(
-            'full_finetune=True requires a separate frozen reference model, but this\n'
-            'node selected shared-ref mode (adapter-toggling), which only works with\n'
-            'LoRA. Use >=2 visible GPUs so policy and reference can be held separately,\n'
-            'or run with LoRA.')
+        # Adapter toggling needs LoRA, so full fine-tuning always holds a separate frozen
+        # reference. On a single GPU both copies can share the device when they fit:
+        # ~2x weights (policy + reference) + 1x gradients + 2x AdamW state, in bf16, ≈ 8x the
+        # bf16 checkpoint size once activations are allowed for.
+        size_mib = _disk_model_size_mib(model_path)
+        free_list = total_free_gpu_mib()
+        single_gpu = torch.cuda.is_available() and torch.cuda.device_count() == 1
+        if single_gpu and size_mib and free_list and size_mib * 8 <= free_list[0] * 0.9:
+            print(f"  Full fine-tuning on one GPU: separate frozen reference on the same device "
+                  f"(model {size_mib} MiB, free {free_list[0]} MiB).")
+            shared_ref = False
+        else:
+            raise RuntimeError(
+                'full_finetune=True requires a separate frozen reference model, which does not\n'
+                f'fit here (model {size_mib} MiB on disk; need ~8x that free on one GPU).\n'
+                'Use >=2 visible GPUs, a smaller model, or LoRA.')
 
     if shared_ref:
         # Load one copy with device_map="auto", use adapter-off for ref.
-        import torch
+        # (torch is imported at module level; a local import here would make `torch`
+        # function-local and break every earlier use in this function.)
         n_gpus = torch.cuda.device_count()
         free_list = total_free_gpu_mib()
         model_size_mib = _disk_model_size_mib(model_path)

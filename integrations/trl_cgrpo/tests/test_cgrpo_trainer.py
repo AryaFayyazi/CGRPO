@@ -102,6 +102,38 @@ class RecordingCGRPOTrainer(CGRPOTrainer):
         return output
 
 
+class FakeVLLMGeneration:
+    """
+    Stands in for `VLLMGeneration` with server-mode semantics: prompts arrive as `num_generations` identical
+    consecutive rows, and completions are returned per row. Lets the vLLM code path run on CPU without vLLM.
+    """
+
+    def __init__(self, tokenizer, max_completion_length):
+        self.tokenizer = tokenizer
+        self.max_completion_length = max_completion_length
+        self.calls = []
+        self.syncs = 0
+
+    def sync_weights(self):
+        self.syncs += 1
+
+    def generate(self, prompts, images, num_generations, profiler=None):
+        assert len(prompts) % num_generations == 0
+        for start in range(0, len(prompts), num_generations):  # server mode only samples prompts[::num_generations]
+            block = prompts[start : start + num_generations]
+            assert all(list(row) == list(block[0]) for row in block)
+        self.calls.append(num_generations)
+        generator = torch.Generator().manual_seed(len(self.calls))
+        completion_ids, logprobs = [], []
+        for _ in prompts:
+            length = int(torch.randint(1, self.max_completion_length, (1,), generator=generator))
+            ids = torch.randint(0, self.tokenizer.vocab_size, (length,), generator=generator).tolist()
+            ids.append(self.tokenizer.eos_token_id)
+            completion_ids.append(ids)
+            logprobs.append([[-1.0] for _ in ids])
+        return [list(p) for p in prompts], completion_ids, logprobs, None
+
+
 class TestCGRPOTrainer(TrlTestCase):
     def _setup(self, **config_kwargs):
         dataset = load_dataset("trl-internal-testing/zen", "standard_prompt_only", split="train")
@@ -200,3 +232,40 @@ class TestCGRPOTrainer(TrlTestCase):
                 train_dataset=dataset,
                 calibration_dataset=calibration_dataset,
             )
+
+    def _vllm_trainer(self, answer_extractor):
+        dataset, calibration_dataset, args = self._setup()
+        trainer = RecordingCGRPOTrainer(
+            model="trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+            reward_funcs=length_reward,
+            args=args,
+            train_dataset=dataset,
+            calibration_dataset=calibration_dataset,
+            answer_extractor=answer_extractor,
+        )
+        # Swap in the fake backend after construction, so the test needs neither vLLM nor a GPU.
+        trainer.use_vllm = True
+        trainer.vllm_generation = FakeVLLMGeneration(trainer._tokenizer, args.max_completion_length)
+        trainer._last_loaded_step = -1
+        return trainer
+
+    def test_vllm_requests_one_generation_per_increment(self):
+        trainer = self._vllm_trainer(answer_extractor=lambda text: "")  # never resolves: 2, then 2 more
+        trainer.train()
+        # per step: calibration asks for max(budget_grid)=4 per prompt, then the increments 2 and 2
+        assert trainer.vllm_generation.calls == [4, 2, 2] * 2
+        assert trainer.vllm_generation.syncs >= 1
+        for batch in trainer.recorded:
+            assert torch.all(batch["completion_mask"].sum(dim=1) > 0)
+
+    def test_vllm_padded_rows_get_no_importance_correction(self):
+        trainer = self._vllm_trainer(answer_extractor=lambda text: "x")  # resolves at k=2
+        trainer.train()
+        assert trainer.vllm_generation.calls == [4, 2] * 2
+        for batch in trainer.recorded:
+            assert batch["completion_mask"][2:].sum() == 0
+            assert torch.isnan(batch["sampling_per_token_logps"][2:, 0]).all()
+            if "importance_sampling_ratio" in batch:
+                ratio = batch["importance_sampling_ratio"]
+                assert torch.isfinite(ratio).all()
+                assert torch.allclose(ratio[2:, 0], torch.ones_like(ratio[2:, 0]))

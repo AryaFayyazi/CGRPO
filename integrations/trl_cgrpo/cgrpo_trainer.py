@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from datasets import Dataset, IterableDataset
 
+from trl.extras.profiling import profiling_context
 from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.utils import get_config_model_id
 
@@ -38,6 +39,9 @@ class CGRPOTrainer(GRPOTrainer):
     Groups stay rectangular for the rest of [`GRPOTrainer`]: a prompt that stops at `k < max(budget_grid)` is padded
     with single-EOS completions. Padded rows get a NaN reward, so the group baseline is computed over real completions
     only and their advantage is zero, and their tokens are removed from the loss mask and the loss normalizer.
+
+    Generation works with transformers and with vLLM in server or colocate mode. With vLLM, each budget increment is
+    one generation request, so a training batch costs at most `len(budget_grid)` requests.
 
     Args:
         model, reward_funcs, **kwargs:
@@ -74,11 +78,6 @@ class CGRPOTrainer(GRPOTrainer):
         for name in ("tools", "environment_factory", "rollout_func"):
             if kwargs.get(name) is not None:
                 raise NotImplementedError(f"CGRPOTrainer does not support `{name}` yet.")
-        if args.use_vllm:
-            raise NotImplementedError(
-                "CGRPOTrainer does not support vLLM generation yet: the adaptive budget needs to generate a variable "
-                "number of completions per prompt, which the vLLM generation path does not expose."
-            )
         if calibration_dataset is None:
             raise ValueError("CGRPOTrainer requires a `calibration_dataset` to fit the conformal thresholds.")
         if isinstance(calibration_dataset, IterableDataset):
@@ -159,6 +158,8 @@ class CGRPOTrainer(GRPOTrainer):
             chunk = examples[start : start + batch_size]
             prompts = [example["prompt"] for example in chunk for _ in range(k_max)]
             prompt_ids, images, multimodal_fields = self._tokenize_prompts(prompts)
+            # Every prompt fills max(budget_grid) == num_generations rows, which is the layout the base path (and
+            # vLLM server mode) expects.
             completion_ids, _ = super()._generate_single_turn(prompt_ids, images, multimodal_fields)
             texts = self._tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
             for i, example in enumerate(chunk):
@@ -232,6 +233,29 @@ class CGRPOTrainer(GRPOTrainer):
             rewards_per_func[padded] = torch.nan
         return rewards_per_func
 
+    def _sample(self, prompt_ids, num_generations, has_tool_images=False):
+        """
+        Generate one completion per row, where every prompt occupies `num_generations` consecutive rows.
+
+        GRPOTrainer's vLLM path assumes `self.num_generations` rows per prompt (server mode samples
+        `prompts[::num_generations]`), but budget increments are smaller, so vLLM is called with the increment size.
+        """
+        if not self.use_vllm:
+            return super()._generate_single_turn(prompt_ids, None, {}, has_tool_images)
+        if self.state.global_step != self._last_loaded_step:
+            with profiling_context(self, "sync_weights"):
+                self.vllm_generation.sync_weights()
+            self._last_loaded_step = self.state.global_step
+        _, completion_ids, logprobs, _ = self.vllm_generation.generate(
+            prompts=prompt_ids,
+            images=None,
+            num_generations=num_generations,
+            profiler=profiling_context(self, "vLLM.generate"),
+        )
+        if logprobs is not None:  # per-token top-k logprobs; keep the sampled token's
+            logprobs = [[lp[0] for lp in seq] for seq in logprobs]
+        return [list(ids) for ids in completion_ids], logprobs
+
     def _generate_single_turn(self, prompt_ids, images, multimodal_fields, has_tool_images=False):
         if self._batch_inputs is None:  # evaluation, or any generation outside a training batch
             return super()._generate_single_turn(prompt_ids, images, multimodal_fields, has_tool_images)
@@ -260,7 +284,7 @@ class CGRPOTrainer(GRPOTrainer):
             need = k - drawn
             if need > 0:
                 batch = [heads[g] for g in active for _ in range(need)]
-                new_ids, new_logprobs = super()._generate_single_turn(batch, None, {}, has_tool_images)
+                new_ids, new_logprobs = self._sample(batch, need, has_tool_images)
                 has_logprobs = new_logprobs is not None
                 texts = self._tokenizer.batch_decode(new_ids, skip_special_tokens=True)
                 for j, g in enumerate(active):
@@ -289,7 +313,9 @@ class CGRPOTrainer(GRPOTrainer):
                 is_real = j < k_used[g]
                 completion_ids.append(completions[g][j] if is_real else [pad_id])
                 if has_logprobs:
-                    completion_logprobs.append(logprobs[g][j] if is_real else [0.0])
+                    # NaN sampling logprob: GRPOTrainer treats it as unavailable, so a padded row's vLLM
+                    # importance-sampling ratio is exactly 1 rather than a spurious correction.
+                    completion_logprobs.append(logprobs[g][j] if is_real else [float("nan")])
                 padded.append(not is_real)
         self._padded_rows = padded
 

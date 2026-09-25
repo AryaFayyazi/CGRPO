@@ -137,6 +137,34 @@ def test_small_kmax_stopping_rule_runs():
     assert max(conf_k_values) == K_MAX and answers[:max(conf_k_values)] == answers
 
 
+def test_eval_accepts_training_grid():
+    """The config default grid stops at 16; evals of 2..32 checkpoints must be able to say so."""
+    src = _eval_pareto_src()
+    assert '"--k-values"' in src
+    assert "cfg.k_values = tuple(sorted(int(x) for x in args.k_values.split(",")))" in src
+    # k=1 is calibrated when the grid contains it (grid_fine), otherwise choose_k_and_sets hits a missing qhat
+    assert "set(cfg.k_values)" in src and "1 <= k <= K_MAX" in src
+
+
+def test_suite_passes_grid_to_every_eval():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sh = open(os.path.join(root, "scripts", "verify", "run_all.sh")).read()
+    calls = sh.count("python -u eval_pareto.py")
+    assert calls > 0
+    assert sh.count('--k-values "$kv"') == calls
+
+
+def test_eval_calibrates_at_auto_delta_by_default():
+    """Paper Table 4 is at the auto-selected delta; a fixed 0.1 pinned MATH-500/MBPP thresholds at 1.0."""
+    src = _eval_pareto_src()
+    assert 'parser.add_argument("--delta", type=str, default="auto"' in src
+    assert "select_delta_auto(np.asarray(_kmax_scores))" in src
+    # the thresholds must be fit on the q-half when delta is chosen on the other half
+    assert "calibrate_qhats(_q_true, _q_groups" in src
+    save = src[src.index("save_data = {"):src.index("save_data = {") + 2000]
+    assert '"delta": float(cfg.deltas[0])' in save and '"delta_mode": delta_mode' in save
+
+
 def test_eval_pareto_module_parses():
     import ast
     ast.parse(open(os.path.join(os.path.dirname(os.path.dirname(
