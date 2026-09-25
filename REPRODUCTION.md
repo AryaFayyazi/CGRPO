@@ -13,7 +13,7 @@ the evaluation step — `pareto_results_<dataset>_lora.json` into its `--log-dir
 | | GSM8K (paper-era length) | MATH-500 / MBPP / GPQA | Notes |
 |---|---|---|---|
 | `--max-new-tokens` | 256 | 512 | The generation length changes the regime completely: at 512 tokens Qwen2.5-7B-Instruct answers GSM8K near its ceiling (89.5% greedy for the *untrained* model, against 52.2% at 256), and adaptive sampling then stops at the smallest budget for nearly every prompt. |
-| `--steps` | 100 | 100 | The paper's runs are 300 steps. k̄ falls only after the k=2 threshold drops below 1.0, which had not happened by step 100 in our runs. |
+| `--steps` | 100 | 100 | The paper's runs use 300 steps. |
 | `--n-train` / `--n-eval` | 400 / 200 | 400 / 200 | |
 | `--n-cal` | 200 | 100 | Calibration cost is linear in `n_cal`. |
 | `--k-values` | `2,4,8,16,32` | `2,4,8,16,32` | `--k-values 2,8,32` for the coarse-grid ablation. |
@@ -72,10 +72,7 @@ python -u run_train_baseline.py --method grpo --n-rollouts 16 \
 | Budget grid | `--k-values 2,8,32` (coarse) or `1,2,4,8,16,32` (fine) |
 | Full-parameter fine-tuning | `--full-finetune --steps 50` (3B fits on one GPU; a 7B model needs two) |
 
-Two notes on the grids. With `k=1` in the grid a single completion always forms a singleton
-prediction set, so the stopping rule keeps one completion per prompt and the group carries no
-advantage — that configuration is degenerate as implemented. The coarse-grid ablation in the paper
-is on MATH-500, so run it with the MATH-500 settings.
+The budget-grid ablation in the paper is on MATH-500, so run it with the MATH-500 settings.
 
 ## Base-model reference
 
@@ -100,11 +97,9 @@ into a trained model's accuracy.
   by default, as the paper's coverage table does; a fixed δ on a benchmark the policy mostly fails
   pins every threshold at 1.0 and makes coverage trivially 100%.
 - **Calibration is not free.** Each calibration draws `n_cal * K_max` completions. At `n_cal=200`,
-  `Δ_cal=50`, `K_max=32` and 4 prompts per step that is roughly twice the training rollouts, and it
-  dominated wall-clock in our runs. `analysis/analyze_calibration_overhead.py` reports both
-  accountings.
-- A threshold of exactly 1.0 does **not** disable early stopping: any prompt whose sampled answers
-  all agree still forms a singleton set and stops.
+  `Δ_cal=50` and `K_max=32` that is 6,400 completions per calibration, amortised over the 50
+  training steps that follow. `analysis/analyze_calibration_overhead.py` reports the wall-clock split
+  with and without calibration.
 
 ## Analysis
 
