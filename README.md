@@ -90,6 +90,7 @@ baselines/               AERO, GDRO, GRESO, Reinforce-Ada/Est
 analysis/                post-hoc analysis of completed runs (see below)
 scripts/slurm/           cluster launchers used for the reported experiments
 integrations/trl_cgrpo/  CGRPOTrainer: a GRPOTrainer subclass for TRL
+REPRODUCTION.md          exact commands and settings for the reported runs
 ```
 
 ## Analysis scripts
