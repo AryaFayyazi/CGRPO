@@ -12,10 +12,11 @@ It works with released TRL (tested with TRL 1.12 and TRL main). Inclusion in TRL
 ## Install
 
 ```bash
-pip install "git+https://github.com/AryaFayyazi/CGRPO.git#subdirectory=integrations"
+pip install trl-cgrpo
+pip install "trl-cgrpo[vllm]"      # with vLLM generation
 ```
 
-or `pip install -e integrations/` from the root of a clone. Requires TRL >= 1.12.
+Requires TRL >= 1.12 (tested with 1.12, 1.14.1 and TRL main).
 
 ## Usage
 

@@ -164,7 +164,7 @@ without this research codebase. It works with released TRL (tested with TRL 1.12
 itself is discussed in [huggingface/trl#7402](https://github.com/huggingface/trl/issues/7402):
 
 ```bash
-pip install "git+https://github.com/AryaFayyazi/CGRPO.git#subdirectory=integrations"
+pip install trl-cgrpo
 ```
 
 or, from a clone of this repository:
