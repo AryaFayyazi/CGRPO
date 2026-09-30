@@ -158,8 +158,8 @@ describes. If a run has no evaluation artifact, the card says so instead of fill
 ## Using C-GRPO with TRL
 
 `integrations/trl_cgrpo/` provides `CGRPOTrainer`, a subclass of TRL's `GRPOTrainer`, so the method can be used
-without this research codebase. It is a standalone copy of the `trl.experimental.cgrpo` implementation proposed
-upstream, and works with released TRL (tested with TRL 1.12 and TRL main):
+without this research codebase. It works with released TRL (tested with TRL 1.12 and TRL main); inclusion in TRL
+itself is discussed in [huggingface/trl#7402](https://github.com/huggingface/trl/issues/7402):
 
 ```bash
 pip install "git+https://github.com/AryaFayyazi/CGRPO.git#subdirectory=integrations"

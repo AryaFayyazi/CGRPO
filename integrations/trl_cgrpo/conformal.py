@@ -1,5 +1,5 @@
-# Standalone copy of trl.experimental.cgrpo (proposed upstream to TRL), so C-GRPO can be
-# used with released TRL (>= 1.12) today. Keep in sync with the upstream files.
+# C-GRPO for TRL: a GRPOTrainer subclass that works with released TRL (>= 1.12).
+# Feature request for inclusion in TRL: https://github.com/huggingface/trl/issues/7402
 
 """Split-conformal utilities for C-GRPO. Pure Python + NumPy, no torch."""
 

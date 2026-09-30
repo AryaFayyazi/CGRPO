@@ -6,8 +6,8 @@ sampling budget chosen by split-conformal prediction. Each prompt is sampled in 
 is a singleton. Thresholds are calibrated on a held-out set with the current policy, before the first step and every
 `recalibrate_every` steps.
 
-This package is a standalone copy of `trl.experimental.cgrpo`, which is being proposed upstream, so it works with
-released TRL (tested with 1.12 and TRL main).
+It works with released TRL (tested with TRL 1.12 and TRL main). Inclusion in TRL itself is discussed in
+[huggingface/trl#7402](https://github.com/huggingface/trl/issues/7402).
 
 ## Install
 
