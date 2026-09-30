@@ -143,17 +143,19 @@ device to themselves.
 ## Publishing an adapter to the Hugging Face Hub
 
 ```bash
-huggingface-cli login
+hf auth login
 python scripts/push_to_hub.py \
   --run-dir runs/cgrpo_gsm8k/<run>/final \
-  --repo-id <user>/c-grpo-qwen2.5-7b-gsm8k \
-  --base-model Qwen/Qwen2.5-7B-Instruct \
+  --repo-id <user>/c-grpo-qwen2.5-7b-instruct-gsm8k \
+  --dataset openai/gsm8k --max-new-tokens 256 \
   --dry-run          # drop to actually upload
 ```
 
-The model card's configuration and evaluation tables are generated **from the run's own
-`events.jsonl` and `pareto_results_*.json`**, so the card cannot drift from the checkpoint it
-describes. If a run has no evaluation artifact, the card says so instead of filling in numbers.
+The upload contains only the adapter weights, an adapter config whose base model is rewritten to its public
+Hub id, and a model card. The card carries the base model's license, and the notices that license requires
+(adapters of Llama models must have "Llama" at the start of their name). Evaluation numbers appear only when
+they come from an `eval_pareto.py` result file in the same run that records it evaluated this adapter;
+otherwise the card points to the paper.
 
 ## Using C-GRPO with TRL
 

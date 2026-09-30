@@ -1,6 +1,7 @@
 # C-GRPO for TRL: a GRPOTrainer subclass that works with released TRL (>= 1.12).
 # Feature request for inclusion in TRL: https://github.com/huggingface/trl/issues/7402
 
+import inspect
 import random
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +28,11 @@ from .conformal import (
 # drop out exactly. The sequence-mean losses ("grpo", "sapo", "luspo") and "dr_grpo" divide by the number of rows,
 # so padded rows would shrink the gradient (and the KL term) in proportion to how many prompts stopped early.
 _SUPPORTED_LOSS_TYPES = ("dapo", "bnpo", "cispo", "vespo")
+
+# TRL 1.14.1 added a required `num_generations` argument to GRPOTrainer._generate_single_turn; earlier releases
+# do not take it. Rows are laid out the same way in both (each prompt repeated per generation), so only the call
+# shape differs.
+_BASE_TAKES_NUM_GENERATIONS = "num_generations" in inspect.signature(GRPOTrainer._generate_single_turn).parameters
 
 
 def _as_answer(value: Any) -> str:
@@ -174,7 +180,7 @@ class CGRPOTrainer(GRPOTrainer):
             prompt_ids, images, multimodal_fields = self._tokenize_prompts(prompts)
             # Every prompt fills max(budget_grid) == num_generations rows, which is the layout the base path (and
             # vLLM server mode) expects.
-            completion_ids, _ = super()._generate_single_turn(prompt_ids, images, multimodal_fields)
+            completion_ids, _ = self._base_generate(prompt_ids, images, multimodal_fields, k_max)
             texts = self._tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
             for i, example in enumerate(chunk):
                 outcomes = self._outcomes(texts[i * k_max : (i + 1) * k_max], example)
@@ -255,7 +261,7 @@ class CGRPOTrainer(GRPOTrainer):
         `prompts[::num_generations]`), but budget increments are smaller, so vLLM is called with the increment size.
         """
         if not self.use_vllm:
-            return super()._generate_single_turn(prompt_ids, None, {}, has_tool_images)
+            return self._base_generate(prompt_ids, None, {}, num_generations, has_tool_images)
         if self.state.global_step != self._last_loaded_step:
             with profiling_context(self, "sync_weights"):
                 self.vllm_generation.sync_weights()
@@ -270,9 +276,25 @@ class CGRPOTrainer(GRPOTrainer):
             logprobs = [[lp[0] for lp in seq] for seq in logprobs]
         return [list(ids) for ids in completion_ids], logprobs
 
-    def _generate_single_turn(self, prompt_ids, images, multimodal_fields, has_tool_images=False):
+    def _base_generate(self, prompt_ids, images, multimodal_fields, num_generations, has_tool_images=False):
+        """Call GRPOTrainer._generate_single_turn with whichever signature the installed TRL uses."""
+        if _BASE_TAKES_NUM_GENERATIONS:
+            return super()._generate_single_turn(
+                prompt_ids, images, multimodal_fields, num_generations, has_tool_images
+            )
+        return super()._generate_single_turn(prompt_ids, images, multimodal_fields, has_tool_images)
+
+    def _generate_single_turn(self, prompt_ids, images, multimodal_fields, *args, **kwargs):
+        # Accept both the pre-1.14.1 signature (..., has_tool_images=False) and the newer one
+        # (..., num_generations, has_tool_images=False).
+        if _BASE_TAKES_NUM_GENERATIONS:
+            num_generations = args[0] if args else kwargs.get("num_generations", self.num_generations)
+            has_tool_images = args[1] if len(args) > 1 else kwargs.get("has_tool_images", False)
+        else:
+            num_generations = self.num_generations
+            has_tool_images = args[0] if args else kwargs.get("has_tool_images", False)
         if self._batch_inputs is None:  # evaluation, or any generation outside a training batch
-            return super()._generate_single_turn(prompt_ids, images, multimodal_fields, has_tool_images)
+            return self._base_generate(prompt_ids, images, multimodal_fields, num_generations, has_tool_images)
 
         group_size = self.num_generations
         if len(prompt_ids) % group_size != 0:

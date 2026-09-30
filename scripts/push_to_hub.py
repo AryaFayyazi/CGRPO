@@ -2,47 +2,94 @@
 """
 Publish a trained C-GRPO LoRA adapter to the Hugging Face Hub.
 
-Uploads the adapter weights plus a model card whose evaluation section is filled
-in FROM THE RUN'S OWN pareto_results_*.json -- nothing is typed by hand, so the
-card cannot drift from the checkpoint it describes. If the run has no evaluation
-artifact yet, the card says so rather than inventing numbers.
+Strict by design: the upload contains only the adapter weights, an adapter config whose base model is
+rewritten to its public Hub id, and a model card. Evaluation numbers appear on the card only when they come
+from an `eval_pareto.py` result file in the same run directory that records it evaluated this adapter
+(`"adapter": "LoRA adapter loaded"`); anything else is left out rather than guessed.
 
 Usage
 -----
-    huggingface-cli login
+    hf auth login
     python scripts/push_to_hub.py \
-        --run-dir runs/conformal_grpo/<run>/final \
-        --repo-id <user>/c-grpo-qwen2.5-7b-gsm8k \
-        [--base-model Qwen/Qwen2.5-7B-Instruct] [--private] [--dry-run]
+        --run-dir runs/<...>/final \
+        --repo-id <user>/c-grpo-qwen2.5-7b-instruct-gsm8k \
+        --dataset openai/gsm8k --max-new-tokens 256 [--private] [--dry-run]
 """
 import argparse
 import glob
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
+
+PAPER_URL = "https://openreview.net/forum?id=TrdqzzvFCs"
+CODE_URL = "https://github.com/AryaFayyazi/CGRPO"
+
+# Hub license identifiers of the supported base models. An adapter is a derivative of its base model and
+# carries the base model's license terms.
+BASE_LICENSES = {
+    "Qwen/Qwen2.5-7B-Instruct": "apache-2.0",
+    "Qwen/Qwen2.5-Math-7B-Instruct": "apache-2.0",
+    "Qwen/Qwen3-32B": "apache-2.0",
+    "meta-llama/Llama-3.1-8B-Instruct": "llama3.1",
+    "google/gemma-3-4b-it": "gemma",
+    "microsoft/Phi-3.5-mini-instruct": "mit",
+    "microsoft/Phi-4-mini-instruct": "mit",
+}
+
+# Notices the base models' licenses require on redistributed derivatives.
+LICENSE_NOTICES = {
+    "llama3.1": ("**Built with Llama.** Llama 3.1 is licensed under the "
+                 "[Llama 3.1 Community License](https://www.llama.com/llama3_1/license/), "
+                 "Copyright © Meta Platforms, Inc. All Rights Reserved."),
+    "gemma": ("Gemma is provided under and subject to the Gemma Terms of Use found at "
+              "[ai.google.dev/gemma/terms](https://ai.google.dev/gemma/terms)."),
+}
+
+CITATION = """@inproceedings{
+anonymous2026cgrpo,
+title={C-{GRPO}: Conformal Group Relative Policy Optimization},
+author={Anonymous},
+booktitle={The Fortieth Annual Conference on Neural Information Processing Systems},
+year={2026},
+url={https://openreview.net/forum?id=TrdqzzvFCs}
+}"""
 
 CARD = """---
-license: mit
+license: {license}
 library_name: peft
 base_model: {base_model}
+datasets:
+  - {dataset}
 tags:
   - reinforcement-learning
   - grpo
+  - c-grpo
   - conformal-prediction
   - lora
 ---
 
-# C-GRPO adapter — {repo_id}
+# {title}
 
-LoRA adapter trained with **C-GRPO** (Conformal Group Relative Policy Optimization),
-which replaces GRPO's fixed rollout group size with a per-prompt adaptive budget
-chosen by split-conformal calibration.
+LoRA adapter for [`{base_model}`](https://huggingface.co/{base_model}) trained with **C-GRPO** (Conformal Group
+Relative Policy Optimization, NeurIPS 2026), which replaces GRPO's fixed group size with a per-prompt sampling
+budget chosen by split-conformal prediction.
 
-- Base model: `{base_model}`
-- Dataset: `{dataset}`
-- Training steps: {steps}
-- Budget grid: {k_values}
-- Mean adaptive rollouts/prompt (`k̄`): {kbar}
+- Paper: {paper_url}
+- Code: {code_url}
+
+## Training
+
+| | |
+|---|---|
+| Base model | `{base_model}` |
+| Dataset | [`{dataset}`](https://huggingface.co/datasets/{dataset}) |
+| Training steps | {steps} |
+| Budget grid | {k_values} |
+| Max new tokens | {max_new_tokens} |
+| LoRA | r={lora_r}, alpha={lora_alpha}, targets {lora_targets} |
 
 ## Usage
 
@@ -52,105 +99,117 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 base = AutoModelForCausalLM.from_pretrained("{base_model}", dtype="bfloat16", device_map="auto")
 model = PeftModel.from_pretrained(base, "{repo_id}")
-tok = AutoTokenizer.from_pretrained("{base_model}")
+tokenizer = AutoTokenizer.from_pretrained("{base_model}")
 ```
 
 ## Evaluation
 
 {eval_section}
 
-## Caveats
+## License
 
-- Adaptive-budget savings depend on `n_cal`, `Δ_cal` and how far `k̄` sits below
-  `K_max`; re-calibration itself consumes `n_cal × K_max` completions per checkpoint.
-- Coverage at the adaptively selected `k` is a post-selection quantity and is not the
-  fixed-`k` object of the coverage theorem. See the repository README.
+This adapter is a derivative of `{base_model}` and is distributed under the base model's license (`{license}`).
+{license_notice}
 
-Code and analysis scripts: {code_url}
+## Citation
+
+```bibtex
+{citation}
+```
 """
 
 
-def find(run_dir, pattern):
-    hits = glob.glob(os.path.join(run_dir, "**", pattern), recursive=True)
-    if not hits:
-        hits = glob.glob(os.path.join(os.path.dirname(run_dir.rstrip("/")), "**", pattern),
-                         recursive=True)
-    return sorted(hits, key=os.path.getmtime)[-1] if hits else None
+def base_model_from_config(cfg):
+    path = cfg.get("base_model_name_or_path") or ""
+    m = re.search(r"models--([^/]+?)--([^/]+)", path)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    if re.fullmatch(r"[\w.-]+/[\w.-]+", path):
+        return path
+    return None
 
 
-def eval_section(run_dir):
-    p = find(run_dir, "pareto_results_*.json")
-    if not p:
-        return ("No evaluation artifact was found alongside this checkpoint. Run "
-                "`eval_pareto.py` to generate `pareto_results_*.json`, then re-upload "
-                "to populate this section.")
-    d = json.load(open(p))
-    res = d.get("results", {})
-    rows = []
-    for k in ("1", "2", "4", "8", "16", "32", "conf"):
-        r = res.get(k)
-        if not r:
+def verified_eval_section(run_dir):
+    """Rows from a result file in this run that records it evaluated this adapter; else None."""
+    run_root = os.path.dirname(run_dir.rstrip("/"))
+    files = [p for p in glob.glob(os.path.join(run_root, "pareto_results_*_lora.json"))
+             if "pre_coverage_fix" not in p]
+    for p in sorted(files, key=os.path.getmtime, reverse=True):
+        try:
+            d = json.load(open(p))
+        except Exception:
             continue
-        label = "conformal (adaptive)" if k == "conf" else f"fixed k={k}"
-        acc = 100.0 * r.get("accuracy", float("nan"))
-        rows.append(f"| {label} | {r.get('avg_k', k)} | {acc:.2f} |")
-    if not rows:
-        return "Evaluation artifact present but contained no parsable rows."
-    head = ("Measured on this checkpoint with `eval_pareto.py` "
-            f"(n_eval={d.get('n_eval', '?')}).\n\n"
-            "| budget | avg k | accuracy (%) |\n|---|---|---|")
-    return head + "\n" + "\n".join(rows)
+        if d.get("adapter") != "LoRA adapter loaded":
+            continue
+        res = d.get("results", {})
+        rows = []
+        for k, label in (("1", "greedy"), ("ave@k", "mean single sample"), ("8", "majority@8"),
+                         ("16", "majority@16"), ("32", "majority@32")):
+            r = res.get(k)
+            if r and "accuracy" in r:
+                rows.append(f"| {label} | {100 * r['accuracy']:.1f} |")
+        if rows:
+            return (f"Measured on this adapter with `eval_pareto.py` (n_eval={d.get('n_eval', '?')}).\n\n"
+                    "| decoding | accuracy (%) |\n|---|---|\n" + "\n".join(rows))
+    return None
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True, help="checkpoint dir (…/final or …/ckpt_step_N)")
+    ap.add_argument("--run-dir", required=True, help="checkpoint dir (.../final or .../ckpt_step_N)")
     ap.add_argument("--repo-id", required=True)
-    ap.add_argument("--base-model", default=None)
+    ap.add_argument("--dataset", required=True, help="Hub dataset id the adapter was trained on")
+    ap.add_argument("--max-new-tokens", type=int, required=True, help="generation length used in training")
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--code-url", default="https://github.com/<user>/c-grpo")
     args = ap.parse_args()
 
-    if not os.path.isdir(args.run_dir):
-        sys.exit(f"no such directory: {args.run_dir}")
-    if not glob.glob(os.path.join(args.run_dir, "adapter_model*")):
-        sys.exit(f"no adapter weights in {args.run_dir}")
+    run_dir = args.run_dir.rstrip("/")
+    for f in ("adapter_config.json", "adapter_model.safetensors"):
+        if not os.path.isfile(os.path.join(run_dir, f)):
+            sys.exit(f"missing {f} in {run_dir}")
+    cfg = json.load(open(os.path.join(run_dir, "adapter_config.json")))
+    base = base_model_from_config(cfg)
+    if base not in BASE_LICENSES:
+        sys.exit(f"base model {base!r} (from adapter_config.json) has no known license mapping; add it to BASE_LICENSES")
 
-    # provenance straight out of the run, never hand-entered
-    state, events = find(args.run_dir, "state.json"), find(args.run_dir, "events.jsonl")
-    steps = kbar = kvals = "unknown"
-    if events:
+    steps, kvals = "unknown", "unknown"
+    events = os.path.join(os.path.dirname(run_dir), "events.jsonl")
+    if os.path.isfile(events):
         rows = [json.loads(l) for l in open(events)]
-        tr = [r["train/avg_k_used"] for r in rows if "train/avg_k_used" in r]
+        tr = [r for r in rows if "train/avg_k_used" in r]
         if tr:
-            steps, kbar = len(tr), f"{sum(tr)/len(tr):.2f}"
+            steps = len(tr)
         boot = [r for r in rows if r.get("event") == "calibration_done" and r.get("qhats")]
         if boot:
             kvals = "{" + ", ".join(sorted(boot[0]["qhats"], key=int)) + "}"
 
-    cfg = {}
-    if state:
-        try:
-            cfg = json.load(open(state))
-        except Exception:
-            pass
-
+    license_id = BASE_LICENSES[base]
+    if license_id == "llama3.1" and not args.repo_id.split("/")[-1].lower().startswith("llama"):
+        sys.exit("the Llama 3.1 license requires 'Llama' at the beginning of a derivative model's name; "
+                 f"rename the repo (e.g. .../Llama-3.1-8B-Instruct-C-GRPO-...), got {args.repo_id!r}")
+    section = verified_eval_section(run_dir)
     card = CARD.format(
-        base_model=args.base_model or "see repository README",
-        repo_id=args.repo_id,
-        dataset=cfg.get("dataset_name", "see repository README"),
-        steps=steps, k_values=kvals, kbar=kbar,
-        eval_section=eval_section(args.run_dir),
-        code_url=args.code_url,
+        license=license_id, license_notice=LICENSE_NOTICES.get(license_id, ""), base_model=base, dataset=args.dataset, repo_id=args.repo_id,
+        title=f"C-GRPO: {base.split('/')[-1]} on {args.dataset.split('/')[-1]}",
+        paper_url=PAPER_URL, code_url=CODE_URL, steps=steps, k_values=kvals,
+        max_new_tokens=args.max_new_tokens, lora_r=cfg.get("r"), lora_alpha=cfg.get("lora_alpha"),
+        lora_targets=", ".join(f"`{t}`" for t in sorted(cfg.get("target_modules") or [])),
+        eval_section=section or f"See the paper for evaluation results: {PAPER_URL}",
+        citation=CITATION,
     )
 
-    card_path = os.path.join(args.run_dir, "README.md")
-    with open(card_path, "w") as fh:
+    stage = tempfile.mkdtemp(prefix="cgrpo_hub_")
+    shutil.copy(os.path.join(run_dir, "adapter_model.safetensors"), stage)
+    cfg_public = dict(cfg, base_model_name_or_path=base)       # never ship a local filesystem path
+    with open(os.path.join(stage, "adapter_config.json"), "w") as fh:
+        json.dump(cfg_public, fh, indent=2)
+    with open(os.path.join(stage, "README.md"), "w") as fh:
         fh.write(card)
-    print(f"wrote model card -> {card_path}\n")
-    print(card[:900] + ("\n…\n" if len(card) > 900 else ""))
 
+    print(f"staged {sorted(os.listdir(stage))} in {stage}")
+    print(f"base model: {base} | license: {BASE_LICENSES[base]} | verified eval: {'yes' if section else 'no'}\n")
+    print(card)
     if args.dry_run:
         print("[dry-run] not uploading.")
         return
@@ -158,8 +217,8 @@ def main():
     from huggingface_hub import HfApi
     api = HfApi()
     api.create_repo(args.repo_id, private=args.private, exist_ok=True, repo_type="model")
-    api.upload_folder(folder_path=args.run_dir, repo_id=args.repo_id, repo_type="model",
-                      ignore_patterns=["optimizer.pt", "*.log"])
+    api.upload_folder(folder_path=stage, repo_id=args.repo_id, repo_type="model",
+                      commit_message="Add C-GRPO LoRA adapter")
     print(f"uploaded -> https://huggingface.co/{args.repo_id}")
 
 

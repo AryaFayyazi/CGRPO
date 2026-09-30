@@ -41,3 +41,8 @@ dist/
 *.swp
 _archive/
 paper/
+
+# ---- package build artifacts ----
+integrations/dist/
+integrations/build/
+*.egg-info/
